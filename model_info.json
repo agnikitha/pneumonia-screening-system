@@ -1,0 +1,22 @@
+{
+    "model": "SVM",
+    "task": "Pneumonia screening",
+    "input_features": 9,
+    "features": [
+        "mean_intensity",
+        "std_intensity",
+        "min_intensity",
+        "max_intensity",
+        "percentile_10",
+        "entropy",
+        "glcm_contrast",
+        "glcm_correlation",
+        "edge_density"
+    ],
+    "test_accuracy": 0.844551,
+    "test_sensitivity": 0.892308,
+    "test_specificity": 0.764957,
+    "test_precision": 0.863524,
+    "test_f1": 0.87768,
+    "test_auroc": 0.919877
+}
