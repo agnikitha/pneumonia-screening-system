@@ -1,0 +1,7 @@
+gradio
+numpy
+pandas
+scikit-learn
+scikit-image
+Pillow
+joblib
