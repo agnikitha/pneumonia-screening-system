@@ -23,14 +23,46 @@ FEATURES_PATH = os.path.join(BASE_DIR, "selected_features.json")
 
 
 # ============================================================
+# STREAMLIT CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="Pneumonia Screening System",
+    page_icon="🫁",
+    layout="wide"
+)
+
+
+# ============================================================
 # LOAD MODEL
 # ============================================================
 
-model = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
+@st.cache_resource
+def load_model():
+    model = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
 
-with open(FEATURES_PATH, "r") as f:
-    selected_features = json.load(f)
+    with open(FEATURES_PATH, "r") as f:
+        selected_features = json.load(f)
+
+    if len(selected_features) != model.n_features_in_:
+        raise ValueError(
+            "The selected feature count does not match the model."
+        )
+
+    if scaler.n_features_in_ != model.n_features_in_:
+        raise ValueError(
+            "The scaler feature count does not match the model."
+        )
+
+    return model, scaler, selected_features
+
+
+try:
+    model, scaler, selected_features = load_model()
+except Exception as e:
+    st.error(f"Unable to load the screening model: {e}")
+    st.stop()
 
 
 # ============================================================
@@ -42,29 +74,43 @@ def extract_prediction_features(image):
     # Convert to grayscale
     image = image.convert("L")
 
-    # Resize to PneumoniaMNIST size
+    # Resize to PneumoniaMNIST dimensions
     image = image.resize((28, 28))
 
-    # Normalize exactly as used during training
+    # Normalize pixel values
     img = np.asarray(image, dtype=np.float32) / 255.0
 
     features = {}
 
-    # Intensity features
+    # --------------------------------------------------------
+    # INTENSITY FEATURES
+    # --------------------------------------------------------
+
     features["mean_intensity"] = np.mean(img)
     features["std_intensity"] = np.std(img)
     features["min_intensity"] = np.min(img)
     features["max_intensity"] = np.max(img)
     features["median_intensity"] = np.median(img)
 
-    # Percentiles
+    # --------------------------------------------------------
+    # PERCENTILE FEATURES
+    # --------------------------------------------------------
+
     features["percentile_10"] = np.percentile(img, 10)
     features["percentile_25"] = np.percentile(img, 25)
     features["percentile_75"] = np.percentile(img, 75)
     features["percentile_90"] = np.percentile(img, 90)
 
-    # Entropy
-    hist, _ = np.histogram(img, bins=256, range=(0, 1))
+    # --------------------------------------------------------
+    # ENTROPY
+    # --------------------------------------------------------
+
+    hist, _ = np.histogram(
+        img,
+        bins=256,
+        range=(0, 1)
+    )
+
     prob = hist / np.sum(hist)
     prob = prob[prob > 0]
 
@@ -72,17 +118,23 @@ def extract_prediction_features(image):
         prob * np.log2(prob)
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # GLCM FEATURES
-    # ========================================================
+    # IMPORTANT: MATCH THE TRAINING PIPELINE
+    # --------------------------------------------------------
 
     img_uint8 = (img * 255).astype(np.uint8)
 
+    # Quantize grayscale image to 32 levels
+    img_quantized = (
+        img_uint8.astype(np.uint16) * 32 // 256
+    ).astype(np.uint8)
+
     glcm = graycomatrix(
-        img_uint8,
+        img_quantized,
         distances=[1],
         angles=[0],
-        levels=256,
+        levels=32,
         symmetric=True,
         normed=True
     )
@@ -107,12 +159,11 @@ def extract_prediction_features(image):
         glcm, "correlation"
     )[0, 0]
 
-    # ========================================================
+    # --------------------------------------------------------
     # EDGE DENSITY
-    # ========================================================
+    # --------------------------------------------------------
 
     edges = sobel(img)
-
     threshold = np.mean(edges)
 
     features["edge_density"] = np.mean(
@@ -128,31 +179,41 @@ def extract_prediction_features(image):
 
 def predict_pneumonia(image):
 
-    if image is None:
-        return None, "Please upload a chest X-ray image."
-
     # Extract features
     features = extract_prediction_features(image)
 
-    # Exact feature order used during training
+    # Arrange features in the exact model input order
     X = pd.DataFrame(
-        [[features[f] for f in selected_features]],
+        [[features[name] for name in selected_features]],
         columns=selected_features
     )
 
-    # Scale
-    X_scaled = scaler.transform(X.values)
+    # Scale features
+    X_scaled = scaler.transform(X)
 
-    # Prediction
-    prediction = model.predict(X_scaled)[0]
+    # Predict class
+    prediction = int(model.predict(X_scaled)[0])
 
-    # Probability
+    # Predict class probabilities
     probabilities = model.predict_proba(X_scaled)[0]
 
-    normal_probability = probabilities[0] * 100
-    pneumonia_probability = probabilities[1] * 100
+    # Map probabilities to the corresponding model classes
+    class_probabilities = dict(
+        zip(model.classes_, probabilities)
+    )
 
-    # Result
+    normal_probability = (
+        float(class_probabilities[0]) * 100
+    )
+
+    pneumonia_probability = (
+        float(class_probabilities[1]) * 100
+    )
+
+    # --------------------------------------------------------
+    # RESULT AND RECOMMENDATION
+    # --------------------------------------------------------
+
     if prediction == 1:
 
         result = "### 🔴 PNEUMONIA"
@@ -169,13 +230,15 @@ def predict_pneumonia(image):
 
         recommendation = (
             "The model classified this image as normal.\n\n"
-            "**Recommendation:** Clinical assessment should still be "
-            "considered when symptoms are present."
+            "**Recommendation:** Clinical assessment should still "
+            "be considered when symptoms are present."
         )
 
     probability_text = (
-        f"**Normal probability:** {normal_probability:.2f}%\n\n"
-        f"**Pneumonia probability:** {pneumonia_probability:.2f}%"
+        f"**Normal probability:** "
+        f"{normal_probability:.2f}%\n\n"
+        f"**Pneumonia probability:** "
+        f"{pneumonia_probability:.2f}%"
     )
 
     return result, probability_text, recommendation
@@ -184,12 +247,6 @@ def predict_pneumonia(image):
 # ============================================================
 # STREAMLIT USER INTERFACE
 # ============================================================
-
-st.set_page_config(
-    page_title="Pneumonia Screening System",
-    page_icon="🫁",
-    layout="wide"
-)
 
 st.title("🫁 Pneumonia Screening System")
 
@@ -212,72 +269,50 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
 
-    image = Image.open(uploaded_file)
+    try:
+        image = Image.open(uploaded_file).convert("RGB")
 
-    col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2)
 
-    with col1:
+        with col1:
+            st.subheader("Uploaded X-ray")
 
-        st.subheader("Uploaded X-ray")
-
-        st.image(
-            image,
-            use_container_width=True
-        )
-
-    with col2:
-
-        st.subheader("Screening Result")
-
-        if st.button(
-            "🔍 Analyze X-ray",
-            type="primary"
-        ):
-
-            result, probability = predict_pneumonia(image)[0:2]
-
-            # Recalculate recommendation
-            features = extract_prediction_features(image)
-
-            X = pd.DataFrame(
-                [[features[f] for f in selected_features]],
-                columns=selected_features
+            st.image(
+                image,
+                use_container_width=True
             )
 
-            X_scaled = scaler.transform(X.values)
+        with col2:
+            st.subheader("Screening Result")
 
-            prediction = model.predict(X_scaled)[0]
+            if st.button(
+                "🔍 Analyze X-ray",
+                type="primary"
+            ):
 
-            if prediction == 1:
+                with st.spinner("Analyzing image..."):
 
-                recommendation = (
-                    "The model classified this image as "
-                    "pneumonia-positive. Further clinical and "
-                    "radiological evaluation is recommended."
+                    result, probability, recommendation = (
+                        predict_pneumonia(image)
+                    )
+
+                st.markdown(result)
+
+                st.markdown("### Prediction Probabilities")
+                st.info(probability)
+
+                st.markdown(
+                    "### Clinical Support Recommendation"
                 )
 
-            else:
+                st.write(recommendation)
 
-                recommendation = (
-                    "The model classified this image as normal. "
-                    "Clinical assessment should still be considered "
-                    "when symptoms are present."
-                )
-
-            st.markdown(result)
-
-            st.markdown("### Prediction Probabilities")
-
-            st.info(probability)
-
-            st.markdown(
-                "### Clinical Support Recommendation"
-            )
-
-            st.write(recommendation)
+    except Exception as e:
+        st.error(f"Unable to process this image: {e}")
 
 st.divider()
 
 st.caption(
     "Pneumonia Screening System | SVM-based research prototype"
 )
+
